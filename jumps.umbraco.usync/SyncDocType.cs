@@ -299,8 +299,8 @@ namespace jumps.umbraco.usync
 
                         var name = node.Element("Info").Element("Alias").Value;
                         
-                        if (Tracker.ContentTypeChanged(node) && 
-                            (node.IsCodeGen() && Tracker.CodeGenContentTypeChanged(node))) 
+                        if ((!node.IsCodeGen() && Tracker.ContentTypeChanged(node)) ||
+                            (Tracker.CodeGenContentTypeChanged(node))) 
                         {
                             // this one will be added or updated. 
                             LogHelper.Debug<SyncDocType>("Adding {0} to process list", () => name);

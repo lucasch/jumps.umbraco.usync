@@ -172,7 +172,11 @@ namespace jumps.umbraco.usync.helpers
             {
                 // we know Id will be off here, we don't care
                 var targetTab = itemTabs.Descendants("Tab").SingleOrDefault(e=>e.Element("Caption").Value== tab.Element("Caption").Value);
+
+                //normalize tabs
                 tab.SetElementValue("Id", 0);
+                tab.Element("SortOrder").Remove();
+                
                 if (targetTab != null)
                 {
                     targetTab.SetElementValue("Id", 0);
