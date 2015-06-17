@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections; 
 using System.Collections.Generic;
+using System.Data;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
@@ -121,8 +122,21 @@ namespace jumps.umbraco.usync
                             var dataTypeService = ApplicationContext.Current.Services.DataTypeService;
                             foreach (var node in dataTypeElements)
                             {
-                                packagingService.ImportDataTypeDefinitions(node);
+                                try
+                                {
+                                    packagingService.ImportDataTypeDefinitions(node);
+                                }
+                                catch (DuplicateNameException ex)
+                                {
+                                    LogHelper.Debug<SyncDataType>("Duplicate definition found, replacing with new.");
+                                    var dt = dataTypeService.GetAllDataTypeDefinitions();
+                                    var old = dt.Single(x => x.Name == node.Attribute("Name").Value);
+                                    old.PropertyEditorAlias = node.Attribute("Id").Value;
+                                    old.Key = new Guid(node.Attribute("Definition").Value);
+                                    dataTypeService.Save(old);
 
+
+                                }
                                 var def = node.Attribute("Definition");
                                 if (def != null)
                                 {

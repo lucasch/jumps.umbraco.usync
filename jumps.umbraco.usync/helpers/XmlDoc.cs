@@ -573,5 +573,19 @@ namespace jumps.umbraco.usync.helpers
 
 
         #endregion
+
+        public static XElement CloneElement(XElement element)
+        {
+            return new XElement(element.Name,
+                element.Attributes(),
+                element.Nodes().Select(n =>
+                {
+                    XElement e = n as XElement;
+                    if (e != null)
+                        return CloneElement(e);
+                    return n;
+                })
+            );
+        }
     }
 }

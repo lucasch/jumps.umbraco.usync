@@ -20,6 +20,8 @@ using umbraco.cms.businesslogic.web;
 
 using jumps.umbraco.usync.Extensions;
 using System.Diagnostics;
+using System.Runtime.Remoting.Messaging;
+
 
 namespace jumps.umbraco.usync.helpers
 {
@@ -30,7 +32,7 @@ namespace jumps.umbraco.usync.helpers
     public static class Tracker
     {
         private static IFileService _fileService;
-        private static IContentTypeService _contentService;
+        private static IContentTypeService _contentTypeService;
         private static IPackagingService _packagingService;
         private static IDataTypeService _dataTypeService;
 
@@ -39,7 +41,7 @@ namespace jumps.umbraco.usync.helpers
         static Tracker()
         {
             _fileService = ApplicationContext.Current.Services.FileService;
-            _contentService = ApplicationContext.Current.Services.ContentTypeService;
+            _contentTypeService = ApplicationContext.Current.Services.ContentTypeService;
             _dataTypeService = ApplicationContext.Current.Services.DataTypeService;
             _packagingService = ApplicationContext.Current.Services.PackagingService;
         }
@@ -48,17 +50,17 @@ namespace jumps.umbraco.usync.helpers
         {
             string filehash = XmlDoc.GetPreCalculatedHash(node);
             if (string.IsNullOrEmpty(filehash))
-                return true; 
+                return true;
 
             XElement aliasElement = node.Element("Info").Element("Alias");
             if (aliasElement == null)
-                return true; 
-            
+                return true;
+
             //var _contentService = ApplicationContext.Current.Services.ContentTypeService;
-            var item = _contentService.GetContentType(aliasElement.Value);
+            var item = _contentTypeService.GetContentType(aliasElement.Value);
 
             if (item == null) // import because it's new. 
-                return true; 
+                return true;
 
             XElement export = item.ExportToXml();
 
@@ -66,9 +68,178 @@ namespace jumps.umbraco.usync.helpers
 
             // XmlDoc.SaveElement("doctmp", item.Alias, export);
 
-            return ( !filehash.Equals(dbMD5)); 
+            return (!filehash.Equals(dbMD5));
         }
 
+        #region Public Granular Change trackers
+        
+        public static bool CodeGenContentTypeChanged(XElement node)
+        {
+            var props = true;
+            var info = true;
+            var structure = true;
+            var parent = true;
+            var name = node.Element("Info").Element("Alias").Value;
+            IContentType c = _contentTypeService.GetContentType(name);
+            if (c == null) return true;
+
+            var second = c.ExportToXml().ToCodeGen();
+
+            return (
+                   (info = InfoChanged(second, node)) ||
+                   (props = PropertiesChanged(second, node)) ||
+                   (structure = StructureChanged(second, node)) ||
+                   (parent = ParentChanged(c, node)));
+        }
+        public static bool PropertiesChanged(IContentType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return PropertiesChanged(node, second);
+        }
+        public static bool PropertiesChanged(IMediaType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return PropertiesChanged(node, second);
+        }
+        public static bool InfoChanged(IContentType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return InfoChanged(node, second);
+        }
+        public static bool InfoChanged(IMediaType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return InfoChanged(node, second);
+        }
+        public static bool StructureChanged(IContentType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return StructureChanged(node, second);
+        }
+        public static bool StructureChanged(IMediaType c, XElement node)
+        {
+            if (c == null) return true;
+            var second = c.ExportToXml();
+            return StructureChanged(node, second);
+        }
+        public static bool ParentChanged(IContentType c, XElement node)
+        {
+            if (c == null) return true;
+            var parent = _contentTypeService.GetContentType(c.ParentId);
+            return ParentChanged(node, parent);
+        }
+        public static bool ParentChanged(IMediaType c, XElement node)
+        {
+            if (c == null) return true;
+            var parent = _contentTypeService.GetMediaType(c.ParentId);
+            return ParentChanged(node, parent);
+        }
+        
+        #endregion
+
+        #region Private Granular Change trackers
+        
+        private static bool PropertiesChanged(XElement first, XElement second)
+        {
+            var properties = first.Element("GenericProperties");
+            var tabs = first.Element("Tabs");
+            var itemProps = second.Element("GenericProperties");
+            var itemTabs = second.Element("Tabs");
+
+            //compare properties
+            if (itemProps.DescendantNodes().Count() != properties.DescendantNodes().Count()) return true;
+
+            foreach (var property in properties.Descendants("GenericProperty"))
+            {
+                var propertyAlias = property.Element("Alias").Value;
+                var ptype = property.Element("Type").Value;
+                XElement matching =
+                    itemProps.Descendants("GenericProperty")
+                        .FirstOrDefault(p => p.Element("Alias").Value == propertyAlias && p.Element("Type").Value == ptype);
+
+                if (matching==null|| XmlDoc.CalculateMD5Hash(property) != XmlDoc.CalculateMD5Hash(matching)) 
+                    return true;
+            }
+
+
+            //compare tabs
+            foreach (var tab in tabs.Descendants("Tab"))
+            {
+                // we know Id will be off here, we don't care
+                var targetTab = itemTabs.Descendants("Tab").SingleOrDefault(e=>e.Element("Caption").Value== tab.Element("Caption").Value);
+                tab.SetElementValue("Id", 0);
+                if (targetTab != null)
+                {
+                    targetTab.SetElementValue("Id", 0);
+                    if (NodeChanged(tab, targetTab))
+                        return true;
+                }
+            }
+
+            return false;
+        }
+        private static bool InfoChanged(XElement first, XElement second)
+        {
+            return NodeChanged(first.Element("Info"), second.Element("Info"));
+        }
+        private static bool StructureChanged(XElement first, XElement second)
+        {
+            var itemStructure = second.Element("Structure");
+            var structure = first.Element("Structure");
+            var changed = NodeChanged(structure, itemStructure) || 
+                          structure.Descendants().Count()!=itemStructure.Descendants().Count();
+            return changed;
+        }
+        private static bool ParentChanged(XElement node, IContentTypeBase parent)
+        {
+            var p = node.Element("Info").Element("Master").Value;
+            var pAlias = "";
+            if (parent != null) pAlias = parent.Alias;
+
+            return p != pAlias;
+        }
+        private static bool NodeChanged(XElement source, XElement target)
+        {
+
+            //var diff = from s in source.Descendants()
+            //    from t in target.Descendants()
+            //    where s.Name == t.Name && s.Value != t.Value
+            //    select NodeChanged(s, t);
+            
+            //return diff.Any();
+
+            if (target == null && !string.IsNullOrWhiteSpace(source.Value)) 
+                return true;
+
+            foreach (var elem in source.Descendants())
+            {
+                var matching = target.Descendants().SingleOrDefault(e => e.Name == elem.Name && e.Value == elem.Value);
+                if (matching == null && !string.IsNullOrWhiteSpace(elem.Value))
+                    return true;
+                
+                if (elem.HasElements)               
+                {
+                    if (NodeChanged(elem, matching))
+                    {
+                        return true;
+                    }
+                } else {
+                    if (!string.IsNullOrWhiteSpace(elem.Value) && elem.Value != matching.Value)
+                    {
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+        
+        #endregion
+        
         public static bool DataTypeChanged(XElement node)
         {
             string filehash = XmlDoc.GetPreCalculatedHash(node);
@@ -114,9 +285,7 @@ namespace jumps.umbraco.usync.helpers
 
         public static bool TemplateChanged(XElement node)
         {
-            var hashProps = new string[] { "Name", "Alias", "Master" };
-
-            string filehash = XmlDoc.CalculateMD5Hash(node, hashProps);
+            string filehash = XmlDoc.GetPreCalculatedHash(node);
             if (string.IsNullOrEmpty(filehash))
                 return true;
 
@@ -130,8 +299,10 @@ namespace jumps.umbraco.usync.helpers
                 return true;
 
             // for a template - we never change the contents - lets just md5 the two 
-            var export = _packagingService.Export(item);
-            string dbMD5 = XmlDoc.CalculateMD5Hash(export, hashProps);
+            // properties we care about (and save having to load the thing from disk?
+
+            string values = item.Alias + item.Name;
+            string dbMD5 = XmlDoc.CalculateMD5Hash(values);
 
             return (!filehash.Equals(dbMD5));
 
@@ -158,6 +329,23 @@ namespace jumps.umbraco.usync.helpers
             string dbMD5 = XmlDoc.CalculateMD5Hash(xmlDoc);
 
             return (!filehash.Equals(dbMD5));
+        }
+
+        // remove known missing properties from def's to fall in line w/CodeGen
+        private static XElement ToCodeGen(this XElement source)
+        {
+            //to remove: 
+            //  <IsListView />
+            //  <Compositions />
+
+            source.Element("Info").Element("IsListView").Remove();
+            source.Element("Info").Element("Compositions").Remove();
+            return source;
+        }
+
+        public static bool IsCodeGen(this XElement source)
+        {
+            return !source.Element("Info").Descendants("Composition").Any();
         }
     }
 }

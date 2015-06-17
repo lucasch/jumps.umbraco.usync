@@ -37,7 +37,7 @@ namespace jumps.umbraco.usync
     /// 
     /// first thing, lets register ourselfs with the umbraco install
     /// </summary>
-    public class uSync : IApplicationEventHandler // works with 4.11.4/5 
+    public class uSync //: IApplicationEventHandler // works with 4.11.4/5 
     {
         // mutex stuff, so we only do this once.
         private static object _syncObj = new object(); 
@@ -121,6 +121,10 @@ namespace jumps.umbraco.usync
         {
             LogHelper.Debug<uSync>("Saving to disk - start");
 
+            // order matters, code gen wants these to exist when doing doc types
+            if (uSyncSettings.Elements.DataTypes)
+                SyncDataType.SaveAllToDisk();
+            
             if ( uSyncSettings.Elements.DocumentTypes ) 
                 SyncDocType.SaveAllToDisk();
 
@@ -136,9 +140,6 @@ namespace jumps.umbraco.usync
             if ( uSyncSettings.Elements.Stylesheets ) 
                 SyncStylesheet.SaveAllToDisk();
 
-            if ( uSyncSettings.Elements.DataTypes ) 
-                SyncDataType.SaveAllToDisk();
-
             if (uSyncSettings.Elements.Dictionary)
             {
                 SyncLanguage.SaveAllToDisk();
@@ -151,7 +152,7 @@ namespace jumps.umbraco.usync
         /// <summary>
         /// read all settings from disk and sync to the database
         /// </summary>
-        public void ReadAllFromDisk()
+        public void ReadAllFromDisk(bool removeProperties=true)
         {
             if (!File.Exists(Path.Combine(IOHelper.MapPath(helpers.uSyncIO.RootFolder), "usync.stop")))
             {
@@ -172,13 +173,13 @@ namespace jumps.umbraco.usync
                         SyncDataType.ReadAllFromDisk();
 
                     if (uSyncSettings.Elements.DocumentTypes)
-                        SyncDocType.ReadAllFromDisk();
+                        SyncDocType.ReadAllFromDisk(removeProperties);
 
                     if (uSyncSettings.Elements.Macros)
                         SyncMacro.ReadAllFromDisk();
 
                     if (uSyncSettings.Elements.MediaTypes)
-                        SyncMediaTypes.ReadAllFromDisk();
+                        SyncMediaTypes.ReadAllFromDisk(removeProperties);
 
                     if (uSyncSettings.Elements.Dictionary)
                     {
@@ -342,27 +343,27 @@ namespace jumps.umbraco.usync
             return typeof(jumps.umbraco.usync.uSync).Assembly.GetName().Version.ToString();
         }
 
-        public void OnApplicationStarted(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
-        {
-            if ( Umbraco.Core.Configuration.UmbracoVersion.Current.Major >= 7 && 
-                Umbraco.Core.Configuration.UmbracoVersion.Current.Minor >= 1 ) 
-            {
-                DoOnStart();
-            }
-            else {
-                LogHelper.Info<uSync>("########### this version of usync if for Umbraco 7.1 and above ##########");
-            }
-        }
+        //public void OnApplicationStarted(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
+        //{
+        //    if ( Umbraco.Core.Configuration.UmbracoVersion.Current.Major >= 7 && 
+        //        Umbraco.Core.Configuration.UmbracoVersion.Current.Minor >= 1 ) 
+        //    {
+        //        DoOnStart();
+        //    }
+        //    else {
+        //        LogHelper.Info<uSync>("########### this version of usync if for Umbraco 7.1 and above ##########");
+        //    }
+        //}
 
-        public void OnApplicationStarting(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
-        {
-            // don't think i do it here.
-        }
+        //public void OnApplicationStarting(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
+        //{
+        //    // don't think i do it here.
+        //}
 
-        public void OnApplicationInitialized(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
-        {
-            // don't think i do it here.
-        }
+        //public void OnApplicationInitialized(UmbracoApplicationBase httpApplication, Umbraco.Core.ApplicationContext applicationContext)
+        //{
+        //    // don't think i do it here.
+        //}
         
         // our events
         public static void OnStarting(uSyncEventArgs e)

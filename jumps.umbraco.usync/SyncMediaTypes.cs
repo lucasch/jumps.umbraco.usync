@@ -10,41 +10,52 @@ using System.IO ;
 
 using umbraco; 
 using umbraco.cms.businesslogic;
-using umbraco.cms.businesslogic.datatype;
-using umbraco.cms.businesslogic.media ;
-using umbraco.cms.businesslogic.propertytype;
-using umbraco.DataLayer;
-using umbraco.cms.businesslogic.template;
 using umbraco.BusinessLogic ; 
 
 using Umbraco.Core;
 using Umbraco.Core.IO;
 using Umbraco.Core.Services;
 using Umbraco.Core.Logging;
-//using Umbraco.Core.Models;
+using Umbraco.Core.Models;
 
 using System.Diagnostics;
+using System.Xml.Linq;
+using jumps.umbraco.usync.Extensions;
 using jumps.umbraco.usync.helpers;
+using Umbraco.Core.Models;
 
 namespace jumps.umbraco.usync
 {
     public class SyncMediaTypes
     {
-        public static void SaveToDisk(MediaType item)
+
+
+        private static Dictionary<string, string> updated;
+        private static int _readCount;
+
+        static IContentTypeService _contentTypeService;
+        static SyncMediaTypes()
+        {
+            _contentTypeService = ApplicationContext.Current.Services.ContentTypeService;
+            updated = new Dictionary<string, string>();
+        }
+
+
+        public static void SaveToDisk(IMediaType item)
         {
             if (item != null)
             {
                 try
                 {
                     XmlDocument xmlDoc = helpers.XmlDoc.CreateDoc();
-                    xmlDoc.AppendChild(MediaTypeHelper.ToXml(xmlDoc, item));
+                    xmlDoc.AppendChild(item.ToXml(xmlDoc));
                     // xmlDoc.AddMD5Hash();
                     helpers.XmlDoc.SaveXmlDoc(item.GetType().ToString(), GetMediaPath(item), "def", xmlDoc);
                 }
                 catch (Exception ex)
                 {
                     LogHelper.Info<SyncMediaTypes>("uSync: Error Saving Media Type {0}, {1}", 
-                        ()=> item.Text, ()=> ex.ToString()); 
+                        ()=> item.Name, ()=> ex.ToString()); 
                 }
             }
         }
@@ -55,7 +66,7 @@ namespace jumps.umbraco.usync
             {
 
 
-                foreach (MediaType item in MediaType.GetAllAsList())
+                foreach (IMediaType item in _contentTypeService.GetAllMediaTypes())
                 {
                     SaveToDisk(item);
                 }
@@ -66,17 +77,18 @@ namespace jumps.umbraco.usync
             }
         }
 
-        private static string GetMediaPath(MediaType item)
+        private static string GetMediaPath(IMediaType item)
         {
             string path = "";
 
             if (item != null)
             {
                 // does this documentType have a parent 
-                if (item.MasterContentType != 0)
+            if (item.ParentId > 0)
                 {
                     // recurse in to the parent to build the path
-                    path = GetMediaPath(new MediaType(item.MasterContentType));
+                var parent = _contentTypeService.GetMediaType(item.ParentId);
+                path = GetMediaPath(parent);
                 }
 
                 // buld the final path (as path is "" to start with we always get
@@ -87,7 +99,7 @@ namespace jumps.umbraco.usync
             return path; 
         }
 
-        public static void ReadAllFromDisk()
+        public static void ReadAllFromDisk(bool removeProperties = true)
         {
             Stopwatch sw = new Stopwatch();
             sw.Start();
@@ -96,44 +108,83 @@ namespace jumps.umbraco.usync
                 helpers.uSyncIO.RootFolder,
                 "MediaType"));
 
-            ReadFromDisk(path, false);
+            updated = new Dictionary<string, string>();
+
             ReadFromDisk(path, true);
+            SecondPassFitAndFix(removeProperties);
 
             sw.Stop();
             LogHelper.Info<uSync>("Processed Media types ({0}ms)", () => sw.ElapsedMilliseconds);
         }
 
-        
+
         public static void ReadFromDisk(string path, bool structure)
         {
-            try
+
+            // actually read it in....
+            if (Directory.Exists(path))
             {
-                // actually read it in....
-                if (Directory.Exists(path))
+                foreach (string file in Directory.GetFiles(path, "*.config"))
                 {
-                    foreach (string file in Directory.GetFiles(path, "*.config"))
+                    XmlDocument xmlDoc = new XmlDocument();
+                    xmlDoc.Load(file);
+                    XmlNode node = xmlDoc.SelectSingleNode("//MediaType");
+
+                    if (node != null)
                     {
-                        XmlDocument xmlDoc = new XmlDocument();
-                        xmlDoc.Load(file);
-
-                        XmlNode node = xmlDoc.SelectSingleNode("//MediaType");
-
-                        if (node != null)
+                        // we're not using the structure flag, structure happens in second pass
+                        IMediaTypeExtensions.ImportMediaType(node);
+                        var a = xmlHelper.GetNodeValue(node.SelectSingleNode("Info/Alias"));
+                        if (!updated.ContainsKey(a))
                         {
-                            MediaTypeHelper.Import(node, structure);
+                            updated.Add(a, file);
+                        }
+                        else
+                        {
+                            LogHelper.Info<SyncDocType>("WARNING: Multiple DocTypes detected - check your uSync folder");
                         }
                     }
+                }
 
-                    foreach (string folder in Directory.GetDirectories(path))
-                    {
-                        ReadFromDisk(folder, structure);
-                    }
+                foreach (string folder in Directory.GetDirectories(path))
+                {
+                    ReadFromDisk(folder, structure);
                 }
             }
-            catch (Exception ex)
+        }
+
+
+        private static void SecondPassFitAndFix(bool removeProperties=true)
+        {
+            foreach (KeyValuePair<string, string> update in updated)
             {
-                LogHelper.Info<SyncMediaTypes>("Read MediaType Failed {0}", ()=> ex.ToString());
-                throw new SystemException(String.Format("Read MediaType failed {0}", ex.ToString()));
+                XElement node = XElement.Load(update.Value);
+                LogHelper.Debug<uSync>("Second pass {0}", () => update.Value);
+                if (node == null) continue;
+                
+                // load the doctype
+                IMediaType mediaType = _contentTypeService.GetMediaType(update.Key);
+                if (mediaType == null) continue;
+
+                LogHelper.Debug<uSync>("Container Type", () => update.Key);
+
+                // is it a container (in v6 api but only really a v7 thing)
+                mediaType.ImportContainerType(node);
+
+                LogHelper.Debug<uSync>("Structure", () => update.Key);
+                // import structure
+                mediaType.ImportStructure(node);
+                        
+                LogHelper.Debug<uSync>("Missing Property Removal", () => update.Key);
+                // delete things that are not in our source xml?
+                if (removeProperties) mediaType.ImportRemoveMissingProps(node);
+
+                LogHelper.Debug<uSync>("Sort order", () => update.Key);
+                // fix tab order 
+                mediaType.ImportTabSortOrder(node);
+
+                LogHelper.Debug<uSync>("Save", () => update.Key);
+                _contentTypeService.Save(mediaType);
             }
         }
 
@@ -150,7 +201,7 @@ namespace jumps.umbraco.usync
                 LogHelper.Debug<SyncMediaTypes>("DeletingMediaType for {0} items", () => e.DeletedEntities.Count());
                 foreach (var mediaType in e.DeletedEntities)
                 {
-                    helpers.XmlDoc.ArchiveFile("MediaType", GetMediaPath(new MediaType(mediaType.Id)), "def");
+                    helpers.XmlDoc.ArchiveFile("MediaType", GetMediaPath(mediaType), "def");
                 }
             }
         }
@@ -162,15 +213,26 @@ namespace jumps.umbraco.usync
                 LogHelper.Debug<SyncMediaTypes>("SaveContent Type Fired for {0} types", () => e.SavedEntities.Count());
                 foreach (var mediaType in e.SavedEntities)
                 {
-                    SaveToDisk(new MediaType(mediaType.Id));
+                    SaveToDisk(mediaType);
                 }
             }
         }
     }
-
+    
+    // LC - all this was moved to IMediaTypeExtensions, left here for merge reference
     public class MediaTypeHelper
     {
-        public static XmlElement ToXml(XmlDocument xd, MediaType mt)
+    /*
+        static IContentTypeService _contentTypeService;
+        static IDataTypeService _dataTypeService;
+        static MediaTypeHelper()
+        {
+            _contentTypeService = ApplicationContext.Current.Services.ContentTypeService;
+            _dataTypeService = ApplicationContext.Current.Services.DataTypeService;
+        }
+
+
+        public static XmlElement ToXml(XmlDocument xd, IMediaType mt)
         {
             if (mt == null)
                 throw new ArgumentNullException("Mediatype cannot be null");
@@ -185,16 +247,20 @@ namespace jumps.umbraco.usync
             XmlElement info = xd.CreateElement("Info");
             doc.AppendChild(info);
 
-            info.AppendChild(XmlHelper.AddTextNode(xd, "Name", mt.Text));
+            info.AppendChild(XmlHelper.AddTextNode(xd, "Name", mt.Name));
             info.AppendChild(XmlHelper.AddTextNode(xd, "Alias", mt.Alias));
-            info.AppendChild(XmlHelper.AddTextNode(xd, "Icon", mt.IconUrl));
+            info.AppendChild(XmlHelper.AddTextNode(xd, "Icon", mt.Icon));
             info.AppendChild(XmlHelper.AddTextNode(xd, "Thumbnail", mt.Thumbnail));
             info.AppendChild(XmlHelper.AddTextNode(xd, "Description", mt.Description));
 
             // v6 property 
-            info.AppendChild(XmlHelper.AddTextNode(xd, "AllowAtRoot", mt.AllowAtRoot.ToString()));
+            info.AppendChild(XmlHelper.AddTextNode(xd, "AllowAtRoot", mt.AllowedAsRoot.ToString()));
             XmlElement structure = xd.CreateElement("Structure");
-            foreach (int child in mt.AllowedChildContentTypeIDs.ToList())
+
+            IMediaType parent = null;
+            var parentTypes = new List<int>();
+
+            foreach (int child in mt.AllowedContentTypes.Select(x => x.Id.Value).ToList())
             {
                 structure.AppendChild(XmlHelper.AddTextNode(xd, "MediaType", new MediaType(child).Alias));
             }
@@ -203,28 +269,36 @@ namespace jumps.umbraco.usync
             //
             // in v6 - media types can be nested. 
             //
-            if (mt.MasterContentType > 0)
+            if (mt.ParentId > 0)
             {
-                MediaType pmt = new MediaType(mt.MasterContentType);
+                parent = _contentTypeService.GetMediaType(mt.ParentId);
 
-                if (pmt != null)
-                    info.AppendChild(XmlHelper.AddTextNode(xd, "Master", pmt.Alias));
+                if (parent != null)
+                    info.AppendChild(XmlHelper.AddTextNode(xd, "Master", parent.Alias));
+
+                parentTypes = parent.PropertyTypes.Select(x => x.Id).ToList();
             }
 
             // stuff in the generic properties tab
             XmlElement props = xd.CreateElement("GenericProperties");
             foreach (PropertyType pt in mt.PropertyTypes)
             {
-                // we only add properties that arn't in a parent (although media types are flat at the mo)
-                if (pt.ContentTypeId == mt.Id)
+                var tab =
+                    mt.PropertyGroups.Where(x => x.PropertyTypes.Contains(pt)).Select(x => x.Name).SingleOrDefault();
+                // we only add properties that aren't in a parent (although media types are flat at the mo)
+                if (!parentTypes.Any() || !parentTypes.Contains(pt.Id))
                 {
+                    var dtId = pt.DataTypeDefinitionId;
+                    var dt = _dataTypeService.GetDataTypeDefinitionById(dtId);
+
                     XmlElement prop = xd.CreateElement("GenericProperty");
                     prop.AppendChild(XmlHelper.AddTextNode(xd, "Name", pt.Name));
                     prop.AppendChild(XmlHelper.AddTextNode(xd, "Alias", pt.Alias));
-                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Type", pt.DataTypeDefinition.DataType.Id.ToString()));
+                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Type", dt.PropertyEditorAlias));
+                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Definition", dt.Key.ToString()));
 
-                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Definition", pt.DataTypeDefinition.UniqueId.ToString()));
-                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Tab", ContentType.Tab.GetCaptionById(pt.TabId)));
+                    prop.AppendChild(XmlHelper.AddTextNode(xd, "Tab", tab ?? ""));
+
                     prop.AppendChild(XmlHelper.AddTextNode(xd, "Mandatory", pt.Mandatory.ToString()));
                     prop.AppendChild(XmlHelper.AddTextNode(xd, "Validation", pt.ValidationRegExp));
                     prop.AppendChild(XmlHelper.AddCDataNode(xd, "Description", pt.Description));
@@ -232,24 +306,32 @@ namespace jumps.umbraco.usync
                     // add this property to the tree
                     props.AppendChild(prop);
                 }
-
-
             }
             // add properties to the doc
             doc.AppendChild(props);
 
             // tabs
             XmlElement tabs = xd.CreateElement("Tabs");
-            foreach (ContentType.TabI t in mt.getVirtualTabs.ToList())
+            foreach (PropertyGroup p in mt.PropertyGroups.ToList())
             {
-                //only add tabs that aren't from a master doctype
-                if (t.ContentType == mt.Id)
+                var parentCount = 0;
+                if (parent != null && parent.PropertyGroups.Contains(p))
                 {
-                    XmlElement tabx = xd.CreateElement("Tab");
-                    tabx.AppendChild(xmlHelper.addTextNode(xd, "Id", t.Id.ToString()));
-                    tabx.AppendChild(xmlHelper.addTextNode(xd, "Caption", t.Caption));
-                    tabx.AppendChild(xmlHelper.addTextNode(xd, "Sort", t.SortOrder.ToString()));
-                    tabs.AppendChild(tabx);
+                    //do we have extra property types?
+                    var parentGroup = parent.PropertyGroups.Where(x => x.Name == p.Name).SingleOrDefault();
+                    parentCount = parentGroup != null ? parentGroup.PropertyTypes.Count : 0;
+                }
+                else
+                {
+                    //only add tabs that aren't from a master doctype
+                    if ((parent != null && !parent.PropertyGroups.Contains(p)) || p.PropertyTypes.Count > parentCount)
+                    {
+                        XmlElement tabx = xd.CreateElement("Tab");
+                        tabx.AppendChild(xmlHelper.addTextNode(xd, "Id", p.Id.ToString()));
+                        tabx.AppendChild(xmlHelper.addTextNode(xd, "Caption", p.Name));
+                        tabx.AppendChild(xmlHelper.addTextNode(xd, "Sort", p.SortOrder.ToString()));
+                        tabs.AppendChild(tabx);
+                    }
                 }
             }
             doc.AppendChild(tabs);
@@ -278,11 +360,11 @@ namespace jumps.umbraco.usync
             if (String.IsNullOrEmpty(alias))
                 throw new Exception("no alias in sync file");
 
-            MediaType mt = null;
+            IMediaType mt = null;
 
             try
             {
-                mt = MediaType.GetByAlias(alias);
+                mt = _contentTypeService.GetMediaType(alias);
             }
             catch (Exception ex)
             {
@@ -292,16 +374,17 @@ namespace jumps.umbraco.usync
             if (mt == null)
             {
                 // we are new 
-                mt = MediaType.MakeNew(u, xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Name")));
+                mt = new MediaType(-1);
+                mt.Name = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Name"));
                 mt.Alias = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Alias"));
             }
             else
             {
-                mt.Text = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Name"));
+                mt.Name= xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Name"));
             }
 
             // core 
-            mt.IconUrl = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Icon"));
+            mt.Icon = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Icon"));
             mt.Thumbnail = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Thumbnail"));
             mt.Description = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Description"));
 
@@ -313,7 +396,7 @@ namespace jumps.umbraco.usync
             {
                 bool.TryParse(allowAtRootNode, out allowAtRoot);
             }
-            mt.AllowAtRoot = allowAtRoot;
+            mt.AllowedAsRoot = allowAtRoot;
 
             //Master content type
             string master = xmlHelper.GetNodeValue(n.SelectSingleNode("Info/Master"));
@@ -324,9 +407,9 @@ namespace jumps.umbraco.usync
                 // throw new System.Exception(String.Format("Throwing in {0}, master {1}", mt.Text, master));
                 try
                 {
-                    MediaType pmt = MediaType.GetByAlias(master);
+                    IMediaType pmt = _contentTypeService.GetMediaType(master);
                     if (pmt != null)
-                        mt.MasterContentType = pmt.Id;
+                        mt.ParentId = pmt.Id;
                 }
                 catch(Exception ex)
                 {
@@ -336,7 +419,8 @@ namespace jumps.umbraco.usync
             }
 
             //tabs
-
+            mt.AddTabsToMediaType(n);
+            
             ContentType.TabI[] tabs = mt.getVirtualTabs;
 
             // load the current tabs
@@ -368,8 +452,11 @@ namespace jumps.umbraco.usync
                 if (!tabList.ContainsKey(t.Caption))
                     tabList.Add(t.Caption, t.Id);
             }
+            
 
             // properties..
+
+            
             global::umbraco.cms.businesslogic.datatype.controls.Factory f =
                 new global::umbraco.cms.businesslogic.datatype.controls.Factory();
 
@@ -439,7 +526,7 @@ namespace jumps.umbraco.usync
                     pt.Save(); 
                 }
             }
-
+            
             if (ImportStructure)
             {
                 if (mt != null)
@@ -467,15 +554,15 @@ namespace jumps.umbraco.usync
             }
 
             mt.Save();
-            /*
-            foreach (MediaType.TabI t in mt.getVirtualTabs.ToList())
-            {
-                MediaType.FlushTabCache(t.Id, mt.Id);
-            }
-
-            // need to do this more i think
-            MediaType.FlushFromCache(mt.Id); 
-             */
+            
+            //foreach (MediaType.TabI t in mt.getVirtualTabs.ToList())
+            //{
+            //    MediaType.FlushTabCache(t.Id, mt.Id);
+            //}
+            //
+            //// need to do this more i think
+            //MediaType.FlushFromCache(mt.Id); 
+            
 
         }
 
@@ -490,6 +577,6 @@ namespace jumps.umbraco.usync
                 }
             return dfId;
         }
-
+*/
     }
 }

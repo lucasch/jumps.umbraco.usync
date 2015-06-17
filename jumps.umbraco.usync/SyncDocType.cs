@@ -98,7 +98,7 @@ namespace jumps.umbraco.usync
         /// Gets all teh documentTypes from the disk, and puts them into
         /// umbraco 
         /// </summary>
-        public static void ReadAllFromDisk()
+        public static void ReadAllFromDisk(bool removeProperties=true)
         {
             // start the enumberation, get the root
             Stopwatch sw = new Stopwatch();
@@ -124,7 +124,7 @@ namespace jumps.umbraco.usync
             // than traversing the tree again. Also we just do the update of the bit we
             // need to update
             // 
-            SecondPassFitAndFix();
+            SecondPassFitAndFix(removeProperties);
             sw.Stop();
 
             LogHelper.Info<uSync>("Processed Doctypes [{0}]({1}ms)", ()=> _readCount, ()=> sw.ElapsedMilliseconds);
@@ -237,7 +237,7 @@ namespace jumps.umbraco.usync
             }
         }
 
-        private static void SecondPassFitAndFix()
+        private static void SecondPassFitAndFix(bool removeProperties=false)
         {
             foreach (KeyValuePair<string, XElement> update in updated)
             {
@@ -252,18 +252,20 @@ namespace jumps.umbraco.usync
                     if (docType != null)
                     {
                         LogHelper.Debug<uSync>("{0} : Container Type", () => update.Key);
-
                         // is it a container (in v6 api but only really a v7 thing)
                         docType.ImportContainerType(node);
 
+                        
                         LogHelper.Debug<uSync>("{0} : Structure", () => update.Key);
                         // import structure
                         docType.ImportStructure(node);
 
-
                         LogHelper.Debug<uSync>("{0} : Missing Property Removal", () => update.Key);
                         // delete things that are not in our source xml?
-                        docType.ImportRemoveMissingProps(node);
+                        if (removeProperties) docType.ImportRemoveMissingProps(node);
+
+                        LogHelper.Debug<uSync>("{0} : Setting property data types", () => update.Key);
+                        docType.UpdatePropertyTypes(node);
 
                         LogHelper.Debug<uSync>("{0} : Sort order", () => update.Key);
                         // fix tab order 
@@ -295,11 +297,12 @@ namespace jumps.umbraco.usync
                         // LogHelper.Info<SyncDocType>("Reading file {0}", () => node.Element("Info").Element("Alias").Value);
                         _readCount++;
 
-                        if (Tracker.ContentTypeChanged(node))
+                        var name = node.Element("Info").Element("Alias").Value;
+                        
+                        if (Tracker.ContentTypeChanged(node) && 
+                            (node.IsCodeGen() && Tracker.CodeGenContentTypeChanged(node))) 
                         {
                             // this one will be added or updated. 
-                            var name = node.Element("Info").Element("Alias").Value;
-
                             LogHelper.Debug<SyncDocType>("Adding {0} to process list", () => name);
 
                             if (!docTypes.ContainsKey(name))
@@ -310,6 +313,9 @@ namespace jumps.umbraco.usync
                             {
                                 LogHelper.Warn<SyncDocType>("Found a duplicated doctype in folder {0}, check your uSync folder for duplicate types", () => name);
                             }
+                        } else
+                        {
+                            LogHelper.Info<SyncDocType>("No changes detected for: "+name);
                         }
                     }
                 }
